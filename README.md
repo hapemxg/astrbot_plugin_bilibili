@@ -80,22 +80,22 @@ plugin i https://github.com/Soulter/astrbot_plugin_bilibili
 
 ## 常见问题
 
-1. 渲染图片失败 (尝试次数: 1): 500, message='Internal Server Error'
+1. 渲染图片失败 (尝试次数: 1): 500, message='Internal Server Error'  
 一般是公共接口不稳定性导致，详见[issue43](https://github.com/Soulter/astrbot_plugin_bilibili/issues/43)
 
-2. 错误代码-352
+2. 错误代码-352  
 尝试[issue34](https://github.com/Soulter/astrbot_plugin_bilibili/issues/34)中方法
 
-3. AstrBot更新到4.0版本后订阅失效
-UMO结构发生了变化，已为"全局列表"指令添加了具体订阅信息，使用该指令查看后重新订阅即可。
+3. AstrBot更新到4.0版本后订阅失效  
+UMO结构发生了变化，已为"全局列表"指令添加了具体订阅信息，使用该指令查看后重新订阅即可。  
 简便的方法是进入data/plugin_data/astrbot_plugin_bilibili文件夹修改UMO的第一部分（使用"/sid"指令了解区别）。
 
-4. 使用新渲染模板发不出图片
-由于图文动态布局采用了纵向布局，如果图片过长，受限于qq本身机制，需以文件形式发送。
+4. 使用新渲染模板发不出图片  
+由于图文动态布局采用了纵向布局，如果图片过长，受限于qq本身机制，需以文件形式发送。  
 你很可能需要在AstrBot"配置文件-系统配置"配置"对外可达的回调接口地址"
 
-5. 生成的图片被错误裁剪或有多余区域
-始终推荐[自部署](https://docs.astrbot.app/others/self-host-t2i.html)，并且由于t2i服务更新，推荐及时更新到最新的镜像。
+5. 生成的图片被错误裁剪或有多余区域  
+始终推荐[自部署](https://docs.astrbot.app/others/self-host-t2i.html)，并且由于t2i服务更新，推荐及时更新到最新的镜像。  
 本插件会始终在合适时支持更新的版本。
 
 ## 更新日志
