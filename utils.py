@@ -3,7 +3,7 @@ import qrcode
 import io
 import base64
 from urllib.parse import urlparse
-from PIL import Image
+from PIL import Image as PILImage
 from astrbot.api import logger
 
 
@@ -103,7 +103,7 @@ async def is_height_valid(img_path: str, max_height: int = 25000) -> bool:
     """
 
     try:
-        with Image.open(img_path) as img:
+        with PILImage.open(img_path) as img:
             _, height = img.size
             return height <= max_height
     except Exception as e:
