@@ -95,6 +95,7 @@ class Main(Star):
         yield event.plain_result(
             f"✅ 已切换样式为：{info['name']} ({style})"
         )
+        event.stop_event()
 
     @filter.regex(BV)
     async def get_video_info(self, event: AstrMessageEvent):
@@ -175,6 +176,7 @@ class Main(Star):
         sub_user = event.unified_msg_origin
         if not uid.isdigit():
             yield event.plain_result("UID 格式错误")
+            event.stop_event()
             return
 
         # 检查是否已经存在该订阅
@@ -183,26 +185,28 @@ class Main(Star):
         ):
             # 如果已存在，更新其过滤条件
             yield event.plain_result("该动态已订阅，已更新过滤条件。")
+            event.stop_event()
             return
         # 以下为新增订阅
+        _sub_data = {
+            "uid": int(uid),
+            "last": "",
+            "is_live": False,
+            "filter_types": filter_types,
+            "filter_regex": filter_regex,
+            "recent_ids": [],
+        }
         try:
-            # 构造新的订阅数据结构
-            _sub_data = {
-                "uid": int(uid),
-                "last": "",
-                "is_live": False,
-                "filter_types": filter_types,
-                "filter_regex": filter_regex,
-                "recent_ids": [],
-            }
             # 获取最新一条动态 (用于初始化 last_id)
             dyn = await self.bili_client.get_latest_dynamics(int(uid))
-            _, dyn_id = (
-                await self.dynamic_listener._parse_and_filter_dynamics(dyn, _sub_data)
-            )[0]
-            _sub_data["last"] = dyn_id  # 更新 last id
-            _sub_data["recent_ids"] = [dyn_id]
-
+            if dyn:
+                parsed_results = await self.dynamic_listener._parse_and_filter_dynamics(dyn, _sub_data)
+                # 寻找列表里第一个出现的有效 ID (不管是哪种类型)
+                for _, dyn_id in parsed_results:
+                    if dyn_id:
+                        _sub_data["last"] = dyn_id
+                        _sub_data["recent_ids"] = [dyn_id]
+                        break
         except Exception as e:
             logger.error(f"获取初始动态失败: {e}")
         finally:
@@ -242,6 +246,7 @@ class Main(Star):
                 img_path = await self.renderer.render_dynamic(render_data)
                 if img_path:
                     yield event.chain_result([Image.fromFileSystem(img_path), Plain(render_data["url"])])
+                    event.stop_event()
                     return
                 else:
                     msg = "渲染图片失败了 (´;ω;`)"
@@ -249,6 +254,7 @@ class Main(Star):
                         filter(None, render_data.get("text", "").split("<br>"))
                     )
                     yield event.chain_result([Plain(msg + "\n" + text), Image.fromURL(avatar)])
+                    event.stop_event()
                     return
             else:
                 chain = [
@@ -256,10 +262,12 @@ class Main(Star):
                     Image.fromURL(avatar),
                 ]
                 yield event.chain_result(chain)
+                event.stop_event()
                 return
         except Exception as e:
             logger.warning(f"订阅出现问题: {e}")
             yield event.plain_result(f"订阅成功！但是:{e}")
+            event.stop_event()
             return
 
     @filter.command("订阅列表", alias={"bili_sub_list"})
@@ -282,6 +290,7 @@ class Main(Star):
                     name = info["name"]
                     ret += f"{idx + 1}. {uid} - {name}\n"
             yield event.plain_result(ret)
+        event.stop_event()
 
     @filter.command("订阅删除", alias={"bili_sub_del"})
     async def sub_del(self, event: AstrMessageEvent):
@@ -290,12 +299,14 @@ class Main(Star):
         parts = re.split(r"\s+", msg)
         if len(parts) < 2:
             yield event.plain_result("用法: /订阅删除 <UID>")
+            event.stop_event()
             return
         uid = parts[1]
         
         sub_user = event.unified_msg_origin
         if not uid or not uid.isdigit():
             yield event.plain_result("参数错误，请提供正确的UID。")
+            event.stop_event()
             return
 
         uid2del = int(uid)
@@ -304,6 +315,7 @@ class Main(Star):
             yield event.plain_result("删除成功")
         else:
             yield event.plain_result("未找到指定的订阅")
+        event.stop_event()
 
     @filter.permission_type(PermissionType.ADMIN)
     @filter.command("全局删除", alias={"bili_global_del"})
@@ -317,10 +329,12 @@ class Main(Star):
             yield event.plain_result(
                 "通过 SID 删除某一个群聊或者私聊的所有订阅。使用 /sid 指令查看当前会话的 SID。"
             )
+            event.stop_event()
             return
 
         ret_msg = await self.data_manager.remove_all_for_user(sid)
         yield event.plain_result(ret_msg)
+        event.stop_event()
 
     @filter.permission_type(PermissionType.ADMIN)
     @filter.command("全局订阅", alias={"bili_global_sub"})
@@ -330,6 +344,7 @@ class Main(Star):
         parts = re.split(r"\s+", msg)
         if len(parts) < 3:
             yield event.plain_result("用法: /全局订阅 <SID> <UID> [过滤类型...]")
+            event.stop_event()
             return
             
         sid = parts[1]
@@ -340,6 +355,7 @@ class Main(Star):
             yield event.plain_result(
                 "请提供正确的SID与UID。使用 /sid 指令查看当前会话的 SID"
             )
+            event.stop_event()
             return
             
         filter_types: List[str] = []
@@ -354,6 +370,7 @@ class Main(Star):
             sid, int(uid), filter_types, filter_regex
         ):
             yield event.plain_result("该动态已订阅，已更新过滤条件")
+            event.stop_event()
             return
 
         usr_info = None
@@ -386,6 +403,7 @@ class Main(Star):
                 yield event.plain_result(
                     f"订阅完成，已为{sid}添加订阅{uid} ({usr_info.get('name', '未知')})，详情见日志。"
                 )
+            event.stop_event()
 
     @filter.permission_type(PermissionType.ADMIN)
     @filter.command("全局列表", alias={"bili_global_list"})
@@ -395,6 +413,7 @@ class Main(Star):
         all_subs = self.data_manager.get_all_subscriptions()
         if not all_subs:
             yield event.plain_result("没有任何会话订阅过。")
+            event.stop_event()
             return
 
         for sub_user in all_subs:
@@ -403,6 +422,7 @@ class Main(Star):
                 uid = sub.get("uid")
                 ret += f"  - {uid}\n"
         yield event.plain_result(ret)
+        event.stop_event()
 
     @filter.event_message_type(EventMessageType.ALL)
     async def parse_miniapp(self, event: AstrMessageEvent, *args, **kwargs):
@@ -428,6 +448,7 @@ class Main(Star):
                                 qqdocurl = await self.bili_client.b23_to_bv(qqdocurl)
                             ret = f"视频: {desc}\n链接: {qqdocurl}"
                             yield event.plain_result(ret)
+                            event.stop_event()
                         news = meta.get("news", {})
                         tag = news.get("tag", "")
                         jumpurl = news.get("jumpUrl", "")
@@ -437,6 +458,7 @@ class Main(Star):
                                 jumpurl = await self.bili_client.b23_to_bv(jumpurl)
                             ret = f"视频: {title}\n链接: {jumpurl}"
                             yield event.plain_result(ret)
+                            event.stop_event()
                     except json.JSONDecodeError:
                         logger.error(f"Failed to decode JSON string: {json_string}")
                     except Exception as e:
@@ -478,6 +500,7 @@ class Main(Star):
                 yield event.plain_result(f"未能解析有效动态。抓到 {len(dyn.get('items', []))} 条动态，但由于类型不符或被过滤，均无法显示。请查看后台日志。")
         else:
             yield event.plain_result("获取动态失败，请检查 UID 是否正确或网络是否正常。")
+        event.stop_event()
 
     @filter.command("直播测试", alias={"bili_live_test"})
     async def live_test(self, event: AstrMessageEvent):
@@ -486,12 +509,14 @@ class Main(Star):
         parts = re.split(r"\s+", msg)
         if len(parts) < 2:
             yield event.plain_result("用法: /直播测试 <UID>")
+            event.stop_event()
             return
         uid = parts[1]
 
         sub_user = event.unified_msg_origin
         if not uid.isdigit():
             yield event.plain_result("UID 格式错误")
+            event.stop_event()
             return
 
         live_room = await self.bili_client.get_live_info_by_uids([int(uid)])
@@ -504,6 +529,7 @@ class Main(Star):
             await self.dynamic_listener._handle_live_status(sub_user, mock_sub_data, live_room, test_mode=True)
         else:
             yield event.plain_result("获取直播信息失败，该用户可能从未开过直播或 UID 错误。")
+        event.stop_event()
 
     async def terminate(self):
         if self.dynamic_listener_task and not self.dynamic_listener_task.done():
