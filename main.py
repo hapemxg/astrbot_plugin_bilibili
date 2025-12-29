@@ -213,13 +213,18 @@ class Main(Star):
             # 保存配置
             await self.data_manager.add_subscription(sub_user, _sub_data)
         # 获取用户信息(可能412，故后置)
+        mid = uid
+        name = "未知UP主"
+        sex = "未知"
+        avatar = ""
         try:
-            usr_info, msg = await self.bili_client.get_user_info(int(uid))
-
-            mid = usr_info["mid"]
-            name = usr_info["name"]
-            sex = usr_info["sex"]
-            avatar = usr_info["face"]
+            res = await self.bili_client.get_user_info(int(uid))
+            if res and res[0]:
+                usr_info = res[0]
+                mid = usr_info.get("mid", uid)
+                name = usr_info.get("name", "未知UP主")
+                sex = usr_info.get("sex", "未知")
+                avatar = usr_info.get("face", "")
         except Exception as e:
             logger.error(f"获取用户信息失败: {e}")
 

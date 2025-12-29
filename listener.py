@@ -38,21 +38,29 @@ class DynamicListener:
 
     async def start(self):
         """启动后台监听循环。"""
+        logger.info(f"Bilibili 订阅监听器已启动，检查间隔: {self.interval_mins} 分钟")
         while True:
-            if self.bili_client.credential is None:
-                logger.warning("bilibili sessdata 未设置，无法获取动态")
-                await asyncio.sleep(60 * self.interval_mins)
-                continue
-
-            all_subs = self.data_manager.get_all_subscriptions()
-            for sub_user, sub_list in all_subs.items():
-                for sub_data in sub_list:
-                    try:
-                        await self._check_single_up(sub_user, sub_data)
-                    except Exception as e:
-                        logger.error(
-                            f"处理订阅者 {sub_user} 的 UP主 {sub_data.get('uid', '未知UID')} 时发生未知错误: {e}\n{traceback.format_exc()}"
-                        )
+            try:
+                if self.bili_client.credential is None:
+                    logger.warning("bilibili sessdata 未设置，将尝试以游客身份获取公开动态")
+                
+                all_subs = self.data_manager.get_all_subscriptions()
+                if not all_subs:
+                    logger.debug("当前无任何订阅")
+                else:
+                    logger.info(f"开始轮询 {len(all_subs)} 个会话的订阅状态...")
+                    
+                for sub_user, sub_list in all_subs.items():
+                    for sub_data in sub_list:
+                        try:
+                            await self._check_single_up(sub_user, sub_data)
+                        except Exception as e:
+                            logger.error(
+                                f"处理订阅者 {sub_user} 的 UP主 {sub_data.get('uid', '未知UID')} 时发生未知错误: {e}\n{traceback.format_exc()}"
+                            )
+            except Exception as e:
+                logger.error(f"轮询主循环发生严重错误: {e}\n{traceback.format_exc()}")
+            
             await asyncio.sleep(60 * self.interval_mins)
 
     async def _check_single_up(self, sub_user: str, sub_data: Dict[str, Any]):
@@ -60,25 +68,26 @@ class DynamicListener:
         uid = sub_data.get("uid")
         if not uid:
             return
-
-        # 检查动态更新
+        
+        logger.debug(f"正在检查 UP 主 {uid} 的更新...")
         dyn = await self.bili_client.get_latest_dynamics(uid)
         if dyn:
             result_list = await self._parse_and_filter_dynamics(dyn, sub_data)
-            sent = 0
-            for render_data, dyn_id in reversed(result_list):
-                if render_data:
-                    if sent < self.dynamic_limit:
-                        sent += 1
-                        await self._handle_new_dynamic(sub_user, render_data)
-                    await self.data_manager.update_last_dynamic_id(
-                        sub_user, uid, dyn_id
-                    )
-
-                elif dyn_id:  # 动态被过滤，只更新ID
-                    await self.data_manager.update_last_dynamic_id(
-                        sub_user, uid, dyn_id
-                    )
+            
+            # result_list 按从新到旧排列。result_list[0] 是最新的一条。
+            if result_list and result_list[0][1]:
+                latest_render_data, latest_dyn_id = result_list[0]
+                
+                # 无论是否被过滤，都直接将 ID 更新为这批动态中最顶端的一个，从而跳过积攒的所有旧动态
+                await self.data_manager.update_last_dynamic_id(
+                    sub_user, uid, latest_dyn_id
+                )
+                
+                if latest_render_data:
+                    logger.info(f"检测到 UP 主 {uid} 有更新，仅推送最新的一条动态: {latest_dyn_id}")
+                    await self._handle_new_dynamic(sub_user, latest_render_data)
+                else:
+                    logger.debug(f"UP 主 {uid} 的最新动态 {latest_dyn_id} 已被过滤，跳过推送。")
 
         # 检查直播状态
         if "live" in sub_data.get("filter_types", []):
