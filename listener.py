@@ -123,6 +123,8 @@ class DynamicListener:
 
     async def _handle_new_dynamic(self, sub_user: str, render_data: Dict[str, Any]):
         """处理并发送新的动态通知。"""
+        if not render_data:
+            return
         # 非图文混合模式
         if not self.rai and render_data.get("type") in (
             "DYNAMIC_TYPE_DRAW",
@@ -153,7 +155,9 @@ class DynamicListener:
                 ls = self._compose_plain_dynamic(render_data, render_fail=True)
                 await self._send_dynamic(sub_user, ls, send_node=True)
 
-    async def _handle_live_status(self, sub_user: str, sub_data: Dict, live_room: Dict):
+    async def _handle_live_status(
+        self, sub_user: str, sub_data: Dict, live_room: Dict, test_mode: bool = False
+    ):
         """处理并发送直播状态变更通知。"""
         is_live = sub_data.get("is_live", False)
 
@@ -171,13 +175,22 @@ class DynamicListener:
         render_data["url"] = link
         render_data["image_urls"] = [cover_url]
         # live_status: 0：未开播    1：正在直播     2：轮播中
-        if live_room.get("live_status", "") == 1 and not is_live:
+        if live_room.get("live_status", "") == 1 and (not is_live or test_mode):
             render_data["text"] = f"📣 你订阅的UP 「{user_name}」 开播了！"
-            await self.data_manager.update_live_status(sub_user, sub_data["uid"], True)
-        if live_room.get("live_status", "") != 1 and is_live:
-            render_data["text"] = f"📣 你订阅的UP 「{user_name}」 下播了！"
-            await self.data_manager.update_live_status(sub_user, sub_data["uid"], False)
-        if render_data["text"]:
+            if not test_mode:
+                await self.data_manager.update_live_status(
+                    sub_user, sub_data["uid"], True
+                )
+        if live_room.get("live_status", "") != 1 and (is_live or test_mode):
+            if test_mode and live_room.get("live_status", "") == 1:
+                pass  # test_mode 下优先显示开播
+            else:
+                render_data["text"] = f"📣 你订阅的UP 「{user_name}」 下播了！"
+                if not test_mode:
+                    await self.data_manager.update_live_status(
+                        sub_user, sub_data["uid"], False
+                    )
+        if render_data.get("text"):
             render_data["qrcode"] = await create_qrcode(link)
             img_path = await self.renderer.render_dynamic(render_data)
             if img_path:
@@ -227,13 +240,19 @@ class DynamicListener:
         filter_regex = data.get("filter_regex", [])
         uid = data.get("uid", "")
         items = await self._get_dynamic_items(dyn, data)  # 不含last及置顶的动态列表
+        
+        logger.info(f"DEBUG: 获取到 {len(items) if items else 0} 条新动态 (原始总计: {len(dyn.get('items', [])) if dyn else 0} 条)")
+        
         result_list = []
         # 无新动态
         if not items:
             result_list.append((None, None))
 
         for item in items:
-            dyn_id = item["id_str"]
+            dyn_id = item.get("id_str")
+            dyn_type = item.get("type")
+            logger.info(f"DEBUG: 正在处理动态 ID: {dyn_id}, 类型: {dyn_type}")
+            
             # 转发类型
             if item.get("type") == "DYNAMIC_TYPE_FORWARD":
                 if "forward" in filter_types:
@@ -339,7 +358,11 @@ class DynamicListener:
                 render_data = await self.renderer.build_render_data(item)
                 render_data["uid"] = uid
                 result_list.append((render_data, dyn_id))
+            elif item.get("type") == "DYNAMIC_TYPE_LIVE_RCMD":
+                logger.info(f"DEBUG: 忽略直播推荐动态 {dyn_id}")
+                result_list.append((None, dyn_id))
             else:
-                result_list.append((None, None))
+                logger.info(f"DEBUG: 遇到未知动态类型 {item.get('type')}, ID: {dyn_id}")
+                result_list.append((None, dyn_id))
 
         return result_list

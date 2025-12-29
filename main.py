@@ -3,19 +3,11 @@ import json
 import asyncio
 from typing import List
 
-from astrbot.core.star.filter.command import GreedyStr
-from astrbot.api.all import *
+from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
+from astrbot.api.star import Context, Star, register
+from astrbot.api.event.filter import PermissionType, EventMessageType
 from astrbot.api import logger, AstrBotConfig
 from astrbot.api.message_components import Image, Plain
-from astrbot.api.event import MessageEventResult, AstrMessageEvent, MessageChain
-from astrbot.api.event.filter import (
-    command,
-    regex,
-    permission_type,
-    PermissionType,
-    event_message_type,
-    EventMessageType,
-)
 
 from .utils import *
 from .renderer import Renderer
@@ -34,7 +26,7 @@ from .constant import (
 from .tools.bangumi import BangumiTool
 
 
-@register("astrbot_plugin_bilibili", "Soulter", "", "", "")
+@register("astrbot_plugin_bilibili", "Soulter", "哔哩哔哩助手", "1.4.18")
 class Main(Star):
     def __init__(self, context: Context, config: AstrBotConfig) -> None:
         super().__init__(context)
@@ -49,7 +41,12 @@ class Main(Star):
 
         self.data_manager = DataManager()
         self.renderer = Renderer(self, self.rai, self.style)
-        self.bili_client = BiliClient(self.cfg.get("sessdata"))
+        self.bili_client = BiliClient(
+            self.cfg.get("sessdata"),
+            self.cfg.get("bili_jct"),
+            self.cfg.get("buvid3"),
+            self.cfg.get("user_agent"),
+        )
         self.dynamic_listener = DynamicListener(
             context=self.context,
             data_manager=self.data_manager,
@@ -60,10 +57,14 @@ class Main(Star):
         self.context.add_llm_tools(BangumiTool())
         self.dynamic_listener_task = asyncio.create_task(self.dynamic_listener.start())
 
-    @command("卡片样式", alias={"bili_card_style"})
-    @permission_type(PermissionType.ADMIN)
-    async def switch_style(self, event: AstrMessageEvent, style: str = None):
+    @filter.command("卡片样式", alias={"bili_card_style"})
+    @filter.permission_type(PermissionType.ADMIN)
+    async def switch_style(self, event: AstrMessageEvent):
         """切换动态卡片样式。不带参数可以查看可用的卡片样式列表。"""
+        msg = event.message_str.strip()
+        parts = re.split(r"\s+", msg)
+        style = parts[1] if len(parts) > 1 else None
+        
         available = get_template_names()
 
         # 不带参数：显示可用样式列表
@@ -75,13 +76,15 @@ class Main(Star):
                 lines.append(f"  • {tid}: {info['name']}{current}")
                 lines.append(f"    {info['description']}")
             lines.append(f"\n使用 /卡片样式 <样式名> 切换")
-            return MessageEventResult().message("\n".join(lines))
+            yield event.plain_result("\n".join(lines))
+            return
 
         # 带参数：切换样式
         if style not in available:
-            return MessageEventResult().message(
+            yield event.plain_result(
                 f"样式 '{style}' 不存在。可用样式：{', '.join(available)}"
             )
+            return
 
         self.style = style
         self.renderer.style = style
@@ -89,11 +92,11 @@ class Main(Star):
         info = CARD_TEMPLATES[style]
         self.cfg["renderer_template"] = style
         self.cfg.save_config()
-        return MessageEventResult().message(
+        yield event.plain_result(
             f"✅ 已切换样式为：{info['name']} ({style})"
         )
 
-    @regex(BV)
+    @filter.regex(BV)
     async def get_video_info(self, event: AstrMessageEvent):
         if self.enable_parse_BV:
             match_ = re.search(BV, event.message_str, re.IGNORECASE)
@@ -116,12 +119,13 @@ class Main(Star):
             # 匹配到纯 BV 号
             elif match_.group(0):
                 bvid = match_.group(0)
+            else:
+                return
 
             video_data = await self.bili_client.get_video_info(bvid=bvid)
             if not video_data:
-                return await event.send(
-                    MessageChain().message("获取视频信息失败了 (´;ω;`)")
-                )
+                yield event.plain_result("获取视频信息失败了 (´;ω;`)")
+                return
             info = video_data["info"]
             online = video_data["online"]
 
@@ -140,23 +144,29 @@ class Main(Star):
 
             img_path = await self.renderer.render_dynamic(render_data)
             if img_path:
-                await event.send(MessageChain().file_image(img_path))
+                yield event.chain_result([Image.fromFileSystem(img_path)])
             else:
                 msg = "渲染图片失败了 (´;ω;`)"
                 text = "\n".join(
                     filter(None, render_data.get("text", "").split("<br>"))
                 )
-                await event.send(
-                    MessageChain().message(msg).message(text).url_image(info["pic"])
-                )
+                yield event.chain_result([Plain(msg + "\n" + text), Image.fromURL(info["pic"])])
 
-    @command("订阅动态", alias={"bili_sub"})
-    async def dynamic_sub(self, event: AstrMessageEvent, uid: str, input: GreedyStr):
-        args = input.strip().split(" ") if input.strip() else []
+    @filter.command("订阅动态", alias={"bili_sub"})
+    async def dynamic_sub(self, event: AstrMessageEvent):
+        """订阅 Bilibili 动态。用法: /订阅动态 <UID> [过滤类型...]"""
+        msg = event.message_str.strip()
+        parts = re.split(r"\s+", msg)
+        if len(parts) < 2:
+            yield event.plain_result("用法: /订阅动态 <UID> [过滤类型...]\n过滤类型可选: video, draw, article, forward, live, lottery")
+            return
+            
+        uid = parts[1]
+        args_list = parts[2:] if len(parts) > 2 else []
 
         filter_types: List[str] = []
         filter_regex: List[str] = []
-        for arg in args:
+        for arg in args_list:
             if arg in VALID_FILTER_TYPES:
                 filter_types.append(arg)
             else:
@@ -164,14 +174,16 @@ class Main(Star):
 
         sub_user = event.unified_msg_origin
         if not uid.isdigit():
-            return MessageEventResult().message("UID 格式错误")
+            yield event.plain_result("UID 格式错误")
+            return
 
         # 检查是否已经存在该订阅
         if await self.data_manager.update_subscription(
             sub_user, int(uid), filter_types, filter_regex
         ):
             # 如果已存在，更新其过滤条件
-            return MessageEventResult().message("该动态已订阅，已更新过滤条件。")
+            yield event.plain_result("该动态已订阅，已更新过滤条件。")
+            return
         # 以下为新增订阅
         try:
             # 构造新的订阅数据结构
@@ -229,28 +241,28 @@ class Main(Star):
             if self.rai:
                 img_path = await self.renderer.render_dynamic(render_data)
                 if img_path:
-                    await event.send(
-                        MessageChain().file_image(img_path).message(render_data["url"])
-                    )
+                    yield event.chain_result([Image.fromFileSystem(img_path), Plain(render_data["url"])])
+                    return
                 else:
                     msg = "渲染图片失败了 (´;ω;`)"
                     text = "\n".join(
                         filter(None, render_data.get("text", "").split("<br>"))
                     )
-                    await event.send(
-                        MessageChain().message(msg).message(text).url_image(avatar)
-                    )
+                    yield event.chain_result([Plain(msg + "\n" + text), Image.fromURL(avatar)])
+                    return
             else:
                 chain = [
                     Plain(render_data["text"]),
                     Image.fromURL(avatar),
                 ]
-                return MessageEventResult(chain=chain, use_t2i_=False)
+                yield event.chain_result(chain)
+                return
         except Exception as e:
             logger.warning(f"订阅出现问题: {e}")
-            return MessageEventResult().message(f"订阅成功！但是:{e}")
+            yield event.plain_result(f"订阅成功！但是:{e}")
+            return
 
-    @command("订阅列表", alias={"bili_sub_list"})
+    @filter.command("订阅列表", alias={"bili_sub_list"})
     async def sub_list(self, event: AstrMessageEvent):
         """查看 bilibili 动态监控列表"""
         sub_user = event.unified_msg_origin
@@ -258,7 +270,8 @@ class Main(Star):
         subs = self.data_manager.get_subscriptions_by_user(sub_user)
 
         if not subs:
-            return MessageEventResult().message("无订阅")
+            yield event.plain_result("无订阅")
+            return
         else:
             for idx, uid_sub_data in enumerate(subs):
                 uid = uid_sub_data["uid"]
@@ -268,48 +281,70 @@ class Main(Star):
                 else:
                     name = info["name"]
                     ret += f"{idx + 1}. {uid} - {name}\n"
-            return MessageEventResult().message(ret)
+            yield event.plain_result(ret)
 
-    @command("订阅删除", alias={"bili_sub_del"})
-    async def sub_del(self, event: AstrMessageEvent, uid: str):
-        """删除 bilibili 动态监控"""
+    @filter.command("订阅删除", alias={"bili_sub_del"})
+    async def sub_del(self, event: AstrMessageEvent):
+        """删除 bilibili 动态监控。用法: /订阅删除 <UID>"""
+        msg = event.message_str.strip()
+        parts = re.split(r"\s+", msg)
+        if len(parts) < 2:
+            yield event.plain_result("用法: /订阅删除 <UID>")
+            return
+        uid = parts[1]
+        
         sub_user = event.unified_msg_origin
         if not uid or not uid.isdigit():
-            return MessageEventResult().message("参数错误，请提供正确的UID。")
+            yield event.plain_result("参数错误，请提供正确的UID。")
+            return
 
         uid2del = int(uid)
 
         if await self.data_manager.remove_subscription(sub_user, uid2del):
-            return MessageEventResult().message("删除成功")
+            yield event.plain_result("删除成功")
         else:
-            return MessageEventResult().message("未找到指定的订阅")
+            yield event.plain_result("未找到指定的订阅")
 
-    @permission_type(PermissionType.ADMIN)
-    @command("全局删除", alias={"bili_global_del"})
-    async def global_sub_del(self, event: AstrMessageEvent, sid: str = None):
-        """管理员指令。通过 SID 删除某一个群聊或者私聊的所有订阅。使用 /sid 查看当前会话的 SID。"""
+    @filter.permission_type(PermissionType.ADMIN)
+    @filter.command("全局删除", alias={"bili_global_del"})
+    async def global_sub_del(self, event: AstrMessageEvent):
+        """管理员指令。通过 SID 删除某一个群聊或者私聊的所有订阅。"""
+        msg = event.message_str.strip()
+        parts = re.split(r"\s+", msg)
+        sid = parts[1] if len(parts) > 1 else None
+        
         if not sid:
-            return MessageEventResult().message(
+            yield event.plain_result(
                 "通过 SID 删除某一个群聊或者私聊的所有订阅。使用 /sid 指令查看当前会话的 SID。"
             )
+            return
 
-        msg = await self.data_manager.remove_all_for_user(sid)
-        return MessageEventResult().message(msg)
+        ret_msg = await self.data_manager.remove_all_for_user(sid)
+        yield event.plain_result(ret_msg)
 
-    @permission_type(PermissionType.ADMIN)
-    @command("全局订阅", alias={"bili_global_sub"})
-    async def global_sub_add(
-        self, event: AstrMessageEvent, sid: str, uid: str, input: GreedyStr
-    ):
-        """管理员指令。通过 UID 添加某一个用户的所有订阅。"""
+    @filter.permission_type(PermissionType.ADMIN)
+    @filter.command("全局订阅", alias={"bili_global_sub"})
+    async def global_sub_add(self, event: AstrMessageEvent):
+        """管理员指令。通过 UID 添加某一个用户的所有订阅。用法: /全局订阅 <SID> <UID> [过滤...]"""
+        msg = event.message_str.strip()
+        parts = re.split(r"\s+", msg)
+        if len(parts) < 3:
+            yield event.plain_result("用法: /全局订阅 <SID> <UID> [过滤类型...]")
+            return
+            
+        sid = parts[1]
+        uid = parts[2]
+        args_list = parts[3:] if len(parts) > 3 else []
+        
         if not sid or not uid.isdigit():
-            return MessageEventResult().message(
+            yield event.plain_result(
                 "请提供正确的SID与UID。使用 /sid 指令查看当前会话的 SID"
             )
-        args = input.strip().split(" ") if input.strip() else []
+            return
+            
         filter_types: List[str] = []
         filter_regex: List[str] = []
-        for arg in args:
+        for arg in args_list:
             if arg in VALID_FILTER_TYPES:
                 filter_types.append(arg)
             else:
@@ -318,8 +353,10 @@ class Main(Star):
         if await self.data_manager.update_subscription(
             sid, int(uid), filter_types, filter_regex
         ):
-            return MessageEventResult().message("该动态已订阅，已更新过滤条件")
+            yield event.plain_result("该动态已订阅，已更新过滤条件")
+            return
 
+        usr_info = None
         try:
             _sub_data = {
                 "uid": int(uid),
@@ -331,43 +368,44 @@ class Main(Star):
             }
 
             dyn = await self.bili_client.get_latest_dynamics(int(uid))
-            _, dyn_id = (
-                await self.dynamic_listener._parse_and_filter_dynamics(dyn, _sub_data)
-            )[0]
-            _sub_data["last"] = dyn_id
-            _sub_data["recent_ids"] = [dyn_id]
+            parsed_dyn = await self.dynamic_listener._parse_and_filter_dynamics(dyn, _sub_data)
+            if parsed_dyn and parsed_dyn[0][1]:
+                dyn_id = parsed_dyn[0][1]
+                _sub_data["last"] = dyn_id
+                _sub_data["recent_ids"] = [dyn_id]
 
-            usr_info, msg = await self.bili_client.get_user_info(int(uid))
+            usr_info, err_msg = await self.bili_client.get_user_info(int(uid))
         except Exception as e:
-            logger.error(f"获取 {usr_info['name']} 初始动态失败: {e}")
+            logger.error(f"获取初始动态失败: {e}")
         finally:
             # 保存配置
             await self.data_manager.add_subscription(sid, _sub_data)
             if not usr_info:
-                return MessageEventResult().message(msg)
+                yield event.plain_result(err_msg if 'err_msg' in locals() else str(e))
             else:
-                return MessageEventResult().message(
-                    f"订阅完成，已为{sid}添加订阅{uid}，详情见日志。"
+                yield event.plain_result(
+                    f"订阅完成，已为{sid}添加订阅{uid} ({usr_info.get('name', '未知')})，详情见日志。"
                 )
 
-    @permission_type(PermissionType.ADMIN)
-    @command("全局列表", alias={"bili_global_list"})
+    @filter.permission_type(PermissionType.ADMIN)
+    @filter.command("全局列表", alias={"bili_global_list"})
     async def global_list(self, event: AstrMessageEvent):
         """管理员指令。查看所有订阅者"""
         ret = "订阅会话列表：\n"
         all_subs = self.data_manager.get_all_subscriptions()
         if not all_subs:
-            return MessageEventResult().message("没有任何会话订阅过。")
+            yield event.plain_result("没有任何会话订阅过。")
+            return
 
         for sub_user in all_subs:
             ret += f"- {sub_user}\n"
             for sub in all_subs[sub_user]:
                 uid = sub.get("uid")
                 ret += f"  - {uid}\n"
-        return MessageEventResult().message(ret)
+        yield event.plain_result(ret)
 
-    @event_message_type(EventMessageType.ALL)
-    async def parse_miniapp(self, event: AstrMessageEvent):
+    @filter.event_message_type(EventMessageType.ALL)
+    async def parse_miniapp(self, event: AstrMessageEvent, *args, **kwargs):
         if self.enable_parse_miniapp:
             for msg_element in event.message_obj.message:
                 if (
@@ -389,7 +427,7 @@ class Main(Star):
                             if "https://b23.tv" in qqdocurl:
                                 qqdocurl = await self.bili_client.b23_to_bv(qqdocurl)
                             ret = f"视频: {desc}\n链接: {qqdocurl}"
-                            await event.send(MessageChain().message(ret))
+                            yield event.plain_result(ret)
                         news = meta.get("news", {})
                         tag = news.get("tag", "")
                         jumpurl = news.get("jumpUrl", "")
@@ -398,31 +436,74 @@ class Main(Star):
                             if "https://b23.tv" in jumpurl:
                                 jumpurl = await self.bili_client.b23_to_bv(jumpurl)
                             ret = f"视频: {title}\n链接: {jumpurl}"
-                            await event.send(MessageChain().message(ret))
+                            yield event.plain_result(ret)
                     except json.JSONDecodeError:
                         logger.error(f"Failed to decode JSON string: {json_string}")
                     except Exception as e:
                         logger.error(f"An error occurred during JSON processing: {e}")
 
-    @command("订阅测试", alias={"bili_sub_test"})
-    async def sub_test(self, event: AstrMessageEvent, uid: str):
+    @filter.command("订阅测试", alias={"bili_sub_test"})
+    async def sub_test(self, event: AstrMessageEvent):
         """测试订阅功能。仅测试获取动态与渲染图片功能，不保存订阅信息。"""
+        msg = event.message_str.strip()
+        parts = re.split(r"\s+", msg)
+        if len(parts) < 2:
+            yield event.plain_result("用法: /订阅测试 <UID>")
+            return
+        uid = parts[1]
+        
         sub_user = event.unified_msg_origin
         dyn = await self.bili_client.get_latest_dynamics(int(uid))
         if dyn:
-            render_data, _ = (
-                await self.dynamic_listener._parse_and_filter_dynamics(
-                    dyn,
-                    {
-                        "uid": uid,
-                        "filter_types": [],
-                        "filter_regex": [],
-                        "last": "",
-                        "recent_ids": [],
-                    },
-                )
-            )[0]
-            await self.dynamic_listener._handle_new_dynamic(sub_user, render_data)
+            parsed_results = await self.dynamic_listener._parse_and_filter_dynamics(
+                dyn,
+                {
+                    "uid": uid,
+                    "filter_types": [],
+                    "filter_regex": [],
+                    "last": "",
+                    "recent_ids": [],
+                },
+            )
+            # 寻找第一个有效的渲染数据
+            render_data = None
+            for r, _ in parsed_results:
+                if r:
+                    render_data = r
+                    break
+            
+            if render_data:
+                await self.dynamic_listener._handle_new_dynamic(sub_user, render_data)
+            else:
+                yield event.plain_result(f"未能解析有效动态。抓到 {len(dyn.get('items', []))} 条动态，但由于类型不符或被过滤，均无法显示。请查看后台日志。")
+        else:
+            yield event.plain_result("获取动态失败，请检查 UID 是否正确或网络是否正常。")
+
+    @filter.command("直播测试", alias={"bili_live_test"})
+    async def live_test(self, event: AstrMessageEvent):
+        """测试直播通知功能。仅测试获取直播状态与渲染图片功能，不保存状态。"""
+        msg = event.message_str.strip()
+        parts = re.split(r"\s+", msg)
+        if len(parts) < 2:
+            yield event.plain_result("用法: /直播测试 <UID>")
+            return
+        uid = parts[1]
+
+        sub_user = event.unified_msg_origin
+        if not uid.isdigit():
+            yield event.plain_result("UID 格式错误")
+            return
+
+        live_room = await self.bili_client.get_live_info_by_uids([int(uid)])
+        if live_room:
+            # 模拟订阅数据
+            mock_sub_data = {
+                "uid": int(uid),
+                "is_live": False  # 设为 False 以便触发“开播”逻辑
+            }
+            await self.dynamic_listener._handle_live_status(sub_user, mock_sub_data, live_room, test_mode=True)
+        else:
+            yield event.plain_result("获取直播信息失败，该用户可能从未开过直播或 UID 错误。")
 
     async def terminate(self):
         if self.dynamic_listener_task and not self.dynamic_listener_task.done():

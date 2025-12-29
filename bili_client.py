@@ -1,8 +1,22 @@
 import aiohttp
+import asyncio
 from astrbot.api import logger
 from typing import Optional, Dict, Any, Tuple
+import aiohttp
+import asyncio
+from astrbot.api import logger
 from bilibili_api import user, Credential, video
 from bilibili_api.utils.network import Api
+
+# 尝试兼容不同版本的 settings 导入
+try:
+    from bilibili_api import settings
+except ImportError:
+    try:
+        from bilibili_api.utils import network as network_utils
+        settings = getattr(network_utils, "settings", None)
+    except ImportError:
+        settings = None
 
 
 class BiliClient:
@@ -10,13 +24,39 @@ class BiliClient:
     负责所有与 Bilibili API 的交互。
     """
 
-    def __init__(self, sessdata: Optional[str] = None):
+    def __init__(
+        self,
+        sessdata: Optional[str] = None,
+        bili_jct: Optional[str] = None,
+        buvid3: Optional[str] = None,
+        user_agent: Optional[str] = None,
+    ):
         """
         初始化 Bilibili API 客户端。
         """
+        # 如果主人没填，默认模拟火狐浏览器
+        self.user_agent = user_agent or "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/115.0"
+        
+        # 尝试设置全局请求头
+        if settings and hasattr(settings, "common_headers"):
+            settings.common_headers.update({
+                "User-Agent": self.user_agent,
+                "Referer": "https://www.bilibili.com/",
+                "Origin": "https://www.bilibili.com",
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "zh-CN,zh;q=0.8,zh-TW;q=0.7,zh-HK;q=0.5,en-US;q=0.3,en;q=0.2",
+            })
+        
         self.credential = None
         if sessdata:
-            self.credential = Credential(sessdata=sessdata)
+            # 填入尽可能完整的凭证
+            self.credential = Credential(
+                sessdata=sessdata, 
+                bili_jct=bili_jct, 
+                buvid3=buvid3,
+                # 有些版本支持 buvid4，咱们也尝试从 buvid3 派生一个（或者如果有的话）
+                buvid4=f"{buvid3}infoc" if buvid3 else None 
+            )
         else:
             logger.warning("未提供 SESSDATA，部分需要登录的API可能无法使用。")
 
@@ -31,7 +71,7 @@ class BiliClient:
         获取视频的详细信息和在线观看人数。
         """
         try:
-            v = video.Video(bvid=bvid)
+            v = video.Video(bvid=bvid, credential=self.credential)
             info = await v.get_info()
             online = await v.get_online()
             return {"info": info, "online": online}
@@ -57,7 +97,6 @@ class BiliClient:
         """
         try:
             u = await self.get_user(uid)
-            # 上游接口同u.get_user_info，即"https://api.bilibili.com/x/space/wbi/acc/info"，412的诱因
             return await u.get_live_info()
         except Exception as e:
             logger.error(f"获取直播间信息失败 (UID: {uid}): {e}")
@@ -72,7 +111,7 @@ class BiliClient:
             "comment": "通过主播uid列表获取直播间状态信息（是否在直播、房间号等）",
         }
         params = {"uids[]": uids}
-        resp = await Api(**API_CONFIG, no_csrf=True).update_params(**params).result
+        resp = await Api(**API_CONFIG, no_csrf=True, credential=self.credential).update_params(**params).result
         if not isinstance(resp, dict) or not resp:
             return None
         live_room = next(iter(resp.values()))
@@ -99,7 +138,8 @@ class BiliClient:
         b23短链转换为原始链接
         """
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+            "User-Agent": self.user_agent,
+            "Referer": "https://www.bilibili.com/"
         }
         async with aiohttp.ClientSession() as session:
             try:
