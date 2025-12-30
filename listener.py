@@ -76,18 +76,27 @@ class DynamicListener:
             
             # result_list 按从新到旧排列。result_list[0] 是最新的一条。
             if result_list and result_list[0][1]:
-                latest_render_data, latest_dyn_id = result_list[0]
-                
-                # 无论是否被过滤，都直接将 ID 更新为这批动态中最顶端的一个，从而跳过积攒的所有旧动态
+                # 无论是否推送，都直接将 ID 更新为这批动态中最顶端的一个，确保下次轮询跳过这批积攒的所有旧动态
+                latest_dyn_id = result_list[0][1]
                 await self.data_manager.update_last_dynamic_id(
                     sub_user, uid, latest_dyn_id
                 )
                 
-                if latest_render_data:
-                    logger.info(f"检测到 UP 主 {uid} 有更新，仅推送最新的一条动态: {latest_dyn_id}")
-                    await self._handle_new_dynamic(sub_user, latest_render_data)
+                # 收集所有有效的（未被过滤的）渲染数据
+                valid_dynamics = [r for r, d in result_list if r]
+                
+                if not valid_dynamics:
+                    logger.debug(f"UP 主 {uid} 的新动态均被过滤或跳过。")
+                elif len(valid_dynamics) > self.dynamic_limit:
+                    # 触发防刷屏机制：如果超过限制，则仅推送最新的一条
+                    logger.info(f"检测到 UP 主 {uid} 有 {len(valid_dynamics)} 条新动态，超过限制 {self.dynamic_limit}，触发防刷屏，仅推送最新一条。")
+                    await self._handle_new_dynamic(sub_user, valid_dynamics[0])
                 else:
-                    logger.debug(f"UP 主 {uid} 的最新动态 {latest_dyn_id} 已被过滤，跳过推送。")
+                    # 未超过限制，按时间顺序（从旧到新）推送所有新动态
+                    if len(valid_dynamics) > 1:
+                        logger.info(f"检测到 UP 主 {uid} 有 {len(valid_dynamics)} 条新动态，正在连续推送...")
+                    for render_data in reversed(valid_dynamics):
+                        await self._handle_new_dynamic(sub_user, render_data)
 
         # 检查直播状态
         if "live" in sub_data.get("filter_types", []):
